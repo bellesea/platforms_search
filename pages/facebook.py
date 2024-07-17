@@ -5,43 +5,31 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import requests
 import io
-import datetime
+import re
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 #####################
 # Get Data
 #####################
-
-@st.cache_data
 def createObjects(csv_content):
     metadata = getMetaData(csv_content)
     df = pd.read_csv(csv_content)
+    if df.empty:
+        return []
     entries = []
     for index, row in df.iterrows():
         entry = {
             'pos': index,
-            'id': post.id,
-            'likes': row['diggCount'],
-            'shares': row['shareCount'],
-            'comments': row['commentCount'],
-            'views': row['playCount'],
-            'collectCount': row['collectCount'],
-            'repostCount': row['repostCount'],
-            'time': row['createTime'],
-            'isAd': row['isAd'],
-            'music': row['music'],
-            'diversificationLabels': row['diversificationLabels'],
-            'suggestedWords': row['suggestedWords'],
-            'keywordTags': row['keywordTags'],
-            'IsAigc': row['IsAigc'],
-            'AIGCDescription': row['AIGCDescription'],
-            'locationCreated': row['locationCreated'],
-            'videoDuration': row['videoDuration'],
-            'description': row['videoDescription'],
-            'author_id': row['author_id'],
-            'author_uniqueId': row['author_uniqueId'],
-            'author_nickname': row['author_nickname'],
-            'author_signature': row['author_signature'],
-            'author_verified': row['author_verified'],
+            'link': row['url'],
+            'type': row['type'],
+            'name': row['name'],
+            'likes': row['likes'],
+            'views': row['views'],
+            'shares': row['shares'],
+            'comments': row['comments'],
+            'description': row['description'],
+            'time': row['time'],
             'trendingTime': metadata[0],
             'collectedTime': metadata[1].replace(".csv", ""),
             'searchTerm': metadata[2]
@@ -53,7 +41,7 @@ def createObjects(csv_content):
 def getData():
     fileNames = []
     all_entries = []
-    directory = '/Users/belle/Desktop/analysis/data_analysis/tt'
+    directory = '/Users/belle/Desktop/analysis/data_analysis/fb'
     for root, dirs, files in os.walk(directory):
         if files:
             for file_name in files:
@@ -61,11 +49,15 @@ def getData():
                     fileNames.append(os.path.join(root, file_name))
 
     for file in fileNames:
-        entry = createObjects(file)
-        all_entries.extend(entry)
+        if(os.stat(file).st_size == 0):
+            print('empty file')
+        else:
+            entry = createObjects(file)
+            all_entries.extend(entry)
 
     return all_entries
 
+@st.cache_data
 def getMetaData(file_path):
     path_parts = file_path.split('/')
     trending_time = ''
@@ -102,29 +94,85 @@ def getUserCategory(df):
     df = df.merge(user_df, on='author_nickname', how='left')
     return df
 
+def cleanUpData(df):
+    df = df[~df['link'].str.contains('login/?', regex=False)]
+    df = df[~df['type'].str.contains('unknown', regex=False)]
+    df = df[~df['name'].str.contains('name', regex=False)]
+    return df
 # #########################
 # # Process Data
 # #########################
-# @st.cache_data
 def createPandas(arr):
     df = pd.DataFrame(arr)
     df = df.drop_duplicates()
-    df = df[df['id'].apply(lambda x: 'https://www.tiktok.com' not in str(x))]
-    df['author_nickname'] = df['author_nickname'].astype(str).str.replace(" ", "_")
-    df['diversificationLabels'] = df['diversificationLabels'].astype(str).str.replace("'", "")
-    df['suggestedWords'] = df['suggestedWords'].astype(str).str.replace("'", "")
-    df['description'] = df['description'].astype(str)
-    # Group by 'id' and apply list function to 'trendingTime'
+    df['id'] = df['link'].apply(extract_facebook_id)
     trending_time_grouped = df.groupby('id')['trendingTime'].apply(list).reset_index()
-    df['link'] = df['id'].apply(lambda x: f"https://www.tiktok.com/share/video/{x}")
-
-    # Merge the grouped 'trendingTime' back with the original DataFrame
+    df['likes'] = df['likes'].apply(convert_likes).astype(int)
+    df['views'] = df['views'].apply(convert_likes).astype(int)
+    df['shares'] = df['shares'].apply(convert_likes).astype(int)
+    df['time'] = df['time'].apply(convertTime)
     df = df.drop(columns='trendingTime').drop_duplicates().merge(trending_time_grouped, on='id')
-
-    # df['likes'] = df['likes'].apply(convert_likes)
-    # df['display_name'] = df['display_name'].str.replace(' ', '_')
+    df['name'] = df['name'].str.replace(' ', '_')
     return df
 
+def extract_facebook_id(url):
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+
+    # Pattern to extract the ID based on known URL formats
+    patterns = [
+        r"videos/[^/]+/(\d+)",                       # Pattern for video ID in URL path
+        r"story_fbid=(\d+)",                   # Pattern for story_fbid in query parameters
+        r"id=(\d+)",                            # Pattern for id in query parameters
+        r"v=(\d+)",                      # Pattern for v in query parameters
+        r"reel/(\d+)"     
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+
+    # If no pattern matches, return empty string
+    return ''
+
+
+def convert_likes(likes):
+    if likes is None or pd.isna(likes):
+        return 0
+    elif isinstance(likes, str):
+        if 'likes' in likes or 'i' in likes or 'views' in likes or 'comment' in likes or 'shares' in likes or 'of' in likes:
+            return 0
+        if 'play' in likes.lower():
+            likes = likes.lower().replace('play', '')
+            
+        likes = likes.lower().replace(',', '')
+        if 'k' in likes:
+            return float(likes.replace('k', '')) * 1000
+        elif 'm' in likes:
+            return float(likes.replace('m', '')) * 1000000
+    try:
+        return pd.to_numeric(likes, errors='coerce')
+    except (TypeError, ValueError):
+        return 0  # Handle any remaining issues with conversion
+
+def countNumOfLikes(df):
+    result_df = df.groupby('likes')['link'].apply(list).reset_index()
+    result_df['count'] = result_df['link'].apply(len)
+    result_df = result_df[['likes', 'count']].sort_values(by='count', ascending=False)
+
+    return result_df
+
+def convertTime(date_string):
+    try:
+        # Define the format matching the input string
+        date_format = '%A, %B %d, %Y at %I:%M %p'
+
+        # Parse the string into a datetime object
+        datetime_obj = datetime.strptime(date_string, date_format)
+        return datetime_obj
+    except:
+        return datetime(2050, 2, 1)
 
 def countNumResults(df):
     result_df = df.groupby(['searchTerm', 'link'])['collectedTime'].apply(lambda x: list(set(x))).reset_index()
@@ -161,9 +209,9 @@ def countNumOfVideoOccurences(df):
     return result_df
 
 def createAccountsDistribution(df):
-    result_df = df.groupby('author_nickname')['id'].apply(list).reset_index()
+    result_df = df.groupby('name')['id'].apply(list).reset_index()
     result_df['frequency'] = result_df['id'].apply(len)
-    result_df = result_df[['author_nickname', 'frequency']].sort_values(by='frequency', ascending=False)
+    result_df = result_df[['name', 'frequency']].sort_values(by='frequency', ascending=False)
 
     return result_df
 
@@ -195,22 +243,24 @@ def parse_collected_time(time_str):
     month, day, hour = time_str.split('-')
     return pd.Timestamp(year=2024, month=int(month), day=int(day), hour=int(hour))
 
+
 def checkFreshnessOfData(df):
     # Convert 'collectedTime' to datetime, assuming the year is 2024 for consistency
 
     # Apply the function to the 'collectedTime' column
     df['collectedTime'] = df['collectedTime'].apply(parse_collected_time)
-
+    df['time']
     # Convert 'time' to datetime
     df['time'] = pd.to_datetime(df['time'])
-    df['time'] = df['time'] - pd.Timedelta(hours=4)
+    cutoff = datetime(2050, 1, 1)
+    df = df[df['time'] < cutoff]
 
     # Calculate the difference in hours
     df['time_difference_hours'] = (df['collectedTime'] - df['time']).dt.total_seconds() / 3600
-    df = df[['id', 'time_difference_hours', 'views', 'likes', 'author_verified', 'pos', 'author_nickname']]
+    df = df[['id', 'time_difference_hours', 'views', 'likes', 'name', 'pos']]
 
     author_df = createAccountsDistribution(df)
-    df = df.merge(author_df, on='author_nickname')
+    df = df.merge(author_df, on='name')
     return df
 
 
@@ -237,108 +287,60 @@ def countViewsOverTime(df):
     
     return pd.DataFrame(results)
 
-def countViewsPerQuery(df):
-    result_df = df.groupby('searchTerm')['id'].apply(list).reset_index()
-    result_df['sum'] = result_df['views'].sum()
-    result_df = result_df[['searchTerm', 'sum', 'views']].sort_values(by='sum', ascending=False)
-
-    return result_df
-
 def getQueries(df):
     result_df = df.groupby('searchTerm')
     return result_df
 
 def getAccounts(df):
-    result_df = df.groupby('author_id')
+    result_df = df.groupby('name')
     return result_df
-
-def countNumOfOrg(df):
-   org = df['cat'].str.contains('ORG').sum()
-   ind = df['cat'].str.contains('IND').sum()
-
-   return org / (org + ind)
 
 arr = getData()
 df = createPandas(arr)
-df = getUserCategory(df)
+df = cleanUpData(df)
+# df = getUserCategory(df)
 new_vid_df = countNumResults(df)
 unique_df = countNumUniqueVideos(df)
-vid_freq_df = countNumOfVideoOccurences(new_vid_df)
+# vid_freq_df = countNumOfVideoOccurences(new_vid_df)
 author_freq_df = createAccountsDistribution(df)
-author_wordcloud = createWordCloud(df, column='author_nickname')
+author_wordcloud = createWordCloud(df, column='name')
 freshness_df = checkFreshnessOfData(df)
 likes_time_df = countLikesOverTime(freshness_df)
 views_time_df = countViewsOverTime(freshness_df)
-video_query_df = sameVideoDifQuery(df)
-video_query_freq_df = countNumOfSameVideoOccurences(video_query_df)
-labels_wordcloud = createWordCloud(df, column='diversificationLabels', width=300, height=200)
-words_wordcloud = createWordCloud(df, column='suggestedWords')
+# video_query_df = sameVideoDifQuery(df)
+# video_query_freq_df = countNumOfSameVideoOccurences(video_query_df)
 description_wordcloud = createWordCloud(df, column='description')
 queries_df = getQueries(df)
 accounts_df = getAccounts(df)
-engagement_box_plt = createBoxPlot(df)
-# views_query_df = countViewsPerQuery(df)
-percentage_verified = round((df['author_verified'].sum() / len(df)) * 100, 2)
-average_follower = round(df['collectCount'].sum() / len(df), 2)
-average_likes = round(df['likes'].sum() / len(df), 0)
-average_views = round(df['views'].sum() / len(df), 0)
-average_comments = round(df['comments'].sum() / len(df), 0)
-average_shares = round(df['shares'].sum() / len(df), 0)
-org_ratio = round(countNumOfOrg(df) * 100, 2)
+# engagement_box_plt = createBoxPlot(df)
+average_likes = round(df['likes'].median(), 0)
+average_views = round(df['views'].median(), 0)
+range_likes = df['likes'].max()
+likes_df = countNumOfLikes(df)
 
 ########################
 # Streamlit stuff
 ########################
-st.header("Learning about political content on TikTok")
+st.header("Learning about political content on Facebook")
 if st.checkbox('All: Show raw data'):
     st.write(df)
 
-one, two, three, four = st.columns(4)
+one, two, three = st.columns(3)
 with one:
     st.metric(label="Collected videos", value=len(df))
 with two:
     st.metric(label="Unique videos", value=len(unique_df))
 with three:
     st.metric(label="Queries searched", value=len(queries_df))
-with four:
-    st.metric(label="Days of collection", value="12")
 
-
-one, two, three, four = st.columns(4)
+st.subheader("Engagement on posts")
+one, two = st.columns(2)
 with one:
-    st.metric(label="Number of accounts", value=len(accounts_df))
-with two:
-    st.metric(label="Average follower count", value=average_follower)
-with three:
-    st.metric(label="Verified accounts", value=f"{percentage_verified} %")
-with four:
-    st.metric(label="Org accounts", value=f"{org_ratio} %")
-one, two, three = st.columns(3)
-with one:
-    st.metric(label="Avg views", value=average_views)
-with two:
     st.metric(label="Avg likes", value=average_likes)
-with three:
-    st.metric(label="Avg comments", value=average_comments)
+with two:
+    st.metric(label="Range of likes", value=f"0 - {range_likes}")
 
-# st.pyplot(engagement_box_plt)
-st.markdown("""---""")
-
-st.subheader("How often is a video shown again when searched at a later time?")
-left_column, right_column = st.columns(2)
-
-with left_column: 
-    st.write(new_vid_df)
-with right_column:
-    st.bar_chart(vid_freq_df, x='count', y='accounts', color='#09AFB4')
-
-st.subheader("How many queries does a video show under?")
-left_column, right_column = st.columns(2)
-
-with left_column: 
-    st.write(video_query_df)
-with right_column:
-    st.bar_chart(video_query_freq_df, x='queries count', y='videos', color='#09AFB4')
+st.bar_chart(likes_df, x="likes", y="count")
 
 st.subheader("Who is posting the accounts?")
 left_column, right_column = st.columns(2)
@@ -352,7 +354,7 @@ st.subheader("How fresh is the content?")
 if st.checkbox('Freshness: show raw data'):
     st.write(freshness_df)
 
-number = st.number_input("How many hours ago do you want to check?", value=24)
+number = st.number_input("How popular are posts when we collect them?", value=24)
 
 freshness_by_hours_df = postedLessThanXHoursAgo(freshness_df, number)
 mean_hours = round(freshness_by_hours_df['pos'].mean(), 2)
@@ -384,20 +386,12 @@ with right_column:
 
 st.write(freshness_by_hours_df)
 
-st.subheader("How popular are posts when we collect them?")
+st.subheader("What happens to posts x hours after posting?")
 st.write("Average views of posts based on time passed before collection")
 st.line_chart(views_time_df, x="hours", y="average views", color="#09AFB4")
 
 st.write("Average likes of posts based on time passed before collection")
 st.line_chart(likes_time_df, x="hours", y="average likes", color="#FF5C00")
 
-st.subheader("What are the videos about?")
-st.write("Most commonly mentioned words in the video description")
+st.subheader("What are the posts about?")
 st.pyplot(description_wordcloud)
-st.write("Most commonly mentioned words from the suggested words")
-st.pyplot(words_wordcloud)
-st.write("What TikTok thinks the videos are about")
-st.pyplot(labels_wordcloud)
-
-# st.write("Categorizing data by queries")
-# st.write(views_query_df)
