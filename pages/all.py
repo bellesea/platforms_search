@@ -442,6 +442,10 @@ def countNumOfOrg(df):
 
    return org / (org + ind)
 
+def exportToCSV(df):
+    df.to_csv('../data.csv')
+
+
 df = pd.concat([getAllTrump(), getD()])
 df = addMoreData(df)
 unique_df = getUniqueVideos(df)
