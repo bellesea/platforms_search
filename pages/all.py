@@ -5,7 +5,7 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import requests
 import io
-import datetime
+from datetime import datetime
 import helper
 import re
 
@@ -112,6 +112,30 @@ def getTikTokData():
                     main_df = new_df
 
     return main_df
+
+
+@st.cache_data
+def readData(file_url):
+    response = requests.get(file_url, verify=False)  
+    response.raise_for_status()  
+
+    df = pd.read_csv(io.StringIO(response.text))
+    df['trendingTime'] = df['trendingTime'].apply(parseTime)
+    df['collectedTime'] = df['collectedTime'].apply(parseTime)
+    return df
+
+def parseTime(timestamp_str):
+    # Convert the string to a datetime object
+    try:
+        timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+    except ValueError:
+        try:
+            timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            date_str = timestamp_str.split("'")[1]
+            timestamp_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+
+    return timestamp_obj
 
 def getMetaData(file_path):
     path_parts = file_path.split('/')
@@ -268,19 +292,19 @@ def countFreshContent(df, platform):
         "percentage": percentage_hours,
     }
 
-def createPlatformStats(df):
+def createPlatformStats(df, function):
     platforms = df['platform'].unique()
     platform_stats = []
     
     for platform in platforms:
         platform_df = df[df['platform'] == platform]
-        stats = countFreshContent(platform_df, platform)
+        stats = function(platform_df, platform)
         platform_stats.append(stats)
     
     result_df = pd.DataFrame(platform_stats)
     result_df = result_df.set_index('platform')
-    
     return result_df
+    
 
 def forEachPlatform(df, function, metric1, metric2, top10=""):
     platforms = df['platform'].unique()
@@ -445,8 +469,22 @@ def countNumOfOrg(df):
 def exportToCSV(df):
     df.to_csv('../data.csv')
 
+def statsPerPlatform(df, platform):
+    numOfVid = len(df)
+    unique_df = getUniqueVideos(df)
+    numOfUniqueVid = len(unique_df)
+    accounts_df = getAccounts(df)
+    numOfAccounts = len(accounts_df)
 
-df = pd.concat([getAllTrump(), getD()])
+    return {
+        "platform": platform,
+        "total videos": numOfVid,
+        "unique videos": numOfUniqueVid,
+        "number of accounts": numOfAccounts
+    }
+
+# df = pd.concat([getAllTrump(), getD()])
+df = readData('https://raw.githubusercontent.com/bellesea/platforms_search/main/data.csv')
 df = addMoreData(df)
 unique_df = getUniqueVideos(df)
 author_freq_df = createAccountsDistribution(df)
@@ -458,19 +496,15 @@ top_10_df = top10Posts(df)
 platform_ranks_top_10 = forEachPlatform(top_10_df, createAccountsDistribution, 'user name', 'frequency', top10="top10")
 query_ranks_top_10 = forEachPlatform2(top_10_df, videosPerQuery, 'searchTerm','videos')
 
+
 new_ranks = pd.concat([platform_ranks_top_10, platform_ranks], axis=1)
 new_ranks = new_ranks[['facebook_', 'facebook_frequency_', 'facebook_top10', 'facebook_frequency_top10', 'instagram_', 'instagram_frequency_', 'instagram_top10', 'instagram_frequency_top10', 'youtube_', 'youtube_frequency_', 'youtube_top10', 'youtube_frequency_top10']]
 
-# # author_wordcloud = createWordCloud(df, column='user name')
 freshness_df = checkFreshnessOfData(df)
 likes_time_df = countLikesOverTime(freshness_df)
-# views_time_df = countViewsOverTime(freshness_df)
 description_wordcloud = createWordCloud(df, column='text')
 queries_df = getQueries(df)
 accounts_df = getAccounts(df)
-average_likes = round(df['likes'].sum() / len(df), 0)
-# average_views = round(df['views'].sum() / len(df), 0)
-
 # ########################
 # # Streamlit stuff
 # ########################
@@ -488,11 +522,14 @@ with four:
     st.metric(label="Number of accounts", value=len(accounts_df))
 
 
-st.metric(label="Avg likes", value=average_likes)
+st.write(df.head(10))
  
 # st.pyplot(engagement_box_plt)
 st.markdown("""---""")
 
+st.subheader("Summary of data collection")
+summary_data = createPlatformStats(df, statsPerPlatform)
+summary_data
 
 st.subheader("How many videos are there per query?")
 query_ranks
@@ -503,7 +540,7 @@ platform_ranks
 author_views_freq_df
 
 st.subheader("How fresh is the content?")
-freshness_platform_df = createPlatformStats(df)
+freshness_platform_df = createPlatformStats(df, countFreshContent)
 freshness_platform_df
 
 
