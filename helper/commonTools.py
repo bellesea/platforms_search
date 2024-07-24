@@ -1,14 +1,13 @@
 from __future__ import annotations
 from csv import DictReader
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import cached_property
 import os
 from typing import Any, Iterator, Type
 
+from numpy import isin
 # from openai import OpenAI
 from pandas import DataFrame
-from collections import defaultdict
-from csv import DictWriter
 
 FACEBOOK = 'facebook'
 INSTAGRAM = 'instagram'
@@ -103,14 +102,11 @@ class _SocialMediaItem:
 
     def to_dict(self) -> dict[str, str | int | datetime | None]:
         """
-        Returns this Post's information as a dictionary, changed to use Standard keys
-        where appropriate and convert types where possible.
+        Returns this SocialMediaItem's information as a dictionary, changed to use Standard
+        keys where appropriate and convert types where possible.
 
         Returns:
-            dict[str, str | int | datetime | None]: _description_
-
-        Yields:
-            Iterator[dict[str, str | int | datetime | None]]: _description_
+            dict[str, str | int | datetime | None]: the information in this SocialMediaItem as a dictionary
         """
         new_dict = {}
         reverse_map = {platform_key: standard_key for standard_key, platform_key in self._map.items()}
@@ -135,7 +131,6 @@ class Post(_SocialMediaItem):
      - user_name
      - text
      - likes
-     - rank
 
     Some keys are supported by some platforms only:
      - id: Instagram, TikTok
@@ -207,18 +202,19 @@ class Post(_SocialMediaItem):
             USER_NAME: 'full name',
             TEXT: 'caption',
             LIKES: 'likes',
+
             RANK: 'rank',
             TYPE: 'type',
             USER_UNIQUE_NAME: 'username',
             COMMENTS: 'comments',
         },
         TIKTOK: {
-            URL: 'url',
             ID: 'id', # also supports URL
             UPLOAD_TIME: 'createTime',
             USER_NAME: 'author_nickname',
             TEXT: 'videoDescription',
             LIKES: 'diggCount',
+
             RANK: 'position',
             TYPE: 'isAd',
             USER_UNIQUE_NAME: 'author_uniqueId',
@@ -233,6 +229,7 @@ class Post(_SocialMediaItem):
             USER_NAME: 'author',
             TEXT: 'description',
             LIKES: 'likes',
+
             RANK: 'position',
             VIDEO_DURATION: 'length',
             VIEWS: 'views',
@@ -267,7 +264,10 @@ class Post(_SocialMediaItem):
 
     @property
     def upload_time(self) -> datetime:
-        return self.get(self.UPLOAD_TIME)
+        time = self.get(self.UPLOAD_TIME)
+        if self.platform is TIKTOK: # patch to deal with time zone difference in TikTok
+            time -= timedelta(0, 0, 0, 0, 0, 4)
+        return time
 
     @property
     def user_name(self) -> str:
@@ -313,7 +313,6 @@ class Post(_SocialMediaItem):
     @property
     def shares(self) -> int:
         return self.get(self.SHARES)
-    
 
     def get(self, key: str, default=None) -> str | int | datetime | None:
         """
@@ -534,8 +533,11 @@ def getFilesToCheck(dir: str, platform: str, include_intermediate: bool = False)
     Returns:
         list[str]: list of filepaths to check
     """
+    print(dir)
     files_to_check = []
     for file in os.listdir(dir):
+        print("FILE")
+        print(file)
         path = os.path.join(dir, file)
         if isRelevantFile(path, platform, include_intermediate):
             files_to_check.append(path)
@@ -556,13 +558,29 @@ def isRelevantFile(filepath: str, platform: str, include_intermediate: bool = Fa
     Returns:
         bool: whether the filepath is relevant
     """
-    # platform = getCleanPlatform(platform)
+    if platform == 'all' and include_intermediate:
+        raise ValueError(f"can only get all files for all platforms")
+    platform = getCleanPlatform(platform)
     return (
         os.path.isfile(filepath)
         and (platform == 'all' or platform in filepath.lower())
         and filepath.endswith('.csv')
-        and (include_intermediate or 'intermediate' not in filepath.lower())
+        and (include_intermediate or not isIntermediateFile(filepath, platform))
     )
+
+def isIntermediateFile(filepath: str, platform: str) -> bool:
+    """
+    Tells whether a file is intermediate, based on the platform's conventions.
+
+    Args:
+        filepath (str): the file to check
+
+    Returns:
+        bool: whether the file is intermediate
+    """
+    isIntermediate = 'intermediate' in filepath.lower()
+    if platform is YOUTUBE:
+        return isIntermediate or len(os.path.basename(filepath).split('_')) == 1
 
 def getGptResponse(gpt: OpenAI, system_prompt: str, user_prompt) -> str:
     """
@@ -610,7 +628,12 @@ def getNum(num: str) -> int:
     else:
         factor = 1
 
-    return int(float(num) * factor)
+    if len(num.split('.')) > 1:
+        whole, decimal = num.split('.')
+        num = whole + decimal
+        factor //= 10 ** len(decimal)
+
+    return int(num) * factor
 
 def getDataCollectionParameters(filepath: str) -> dict[str, str | datetime]:
     """
@@ -669,6 +692,8 @@ def getCleanPlatform(platform: str) -> str:
         return TIKTOK
     if YOUTUBE in platform:
         return YOUTUBE
+    if platform.lower() == 'all':
+        return 'all'
 
     raise ValueError(f"platform {platform} is not supported!")
 
@@ -720,59 +745,32 @@ def getUsersFromPostFile(filepath: str) -> set[User]:
         users.add(User(
             {
                 _map[User.NAME]: post.user_name,
+                _map[User.UNIQUE_NAME]: unique_name,
+                _map[User.BIO]: None,
+                _map[User.FOLLOWERS]: None,
             },
             platform
         ))
 
     return users
 
-
-def labelUsers(gpt: OpenAI, users, filepath: str = None) -> dict[str, set[tuple]]:
+def get_piece(part: int, n: int, l: list) -> list:
     """
-    Labels a set of users using ChatGPT 4.0.
+    Gets a piece of a list. Splits a list into total_parts, and returns part.
+    part index starts from 1.
 
     Args:
-        gpt (OpenAI): the ChatGPT client to use
-        users (set[tuple[str, str]]): the set of users to label, as tuples of username, full name
-        filepath (str): a path to a file to write the labeled users to
+        part (int): the part of the list to get
+        total_parts (int): the total parts the list would be split into
+        l (list): the list to split
 
     Returns:
-        dict[str, set[tuple]]: a dict of label: set(users)
+        list: the desired part of the list
     """
-    labeledUsers = defaultdict(set)
+    part -= 1
+    num_leftover = len(l) % n
+    chunk_size = len(l) // n + (part < num_leftover)
 
-    for user in users:
-        label = getGptResponse(gpt, user)
-        labeledUsers[label].add(user)
-        if filepath:
-            writeLabeledUser(filepath, user, label)
-
-    return labeledUsers
-
-
-def writeLabeledUser(filepath: str, user, label: str) -> None:
-    """
-    Writes a user with its label to a csv file, using the headers "username",
-    "full name", and "label".
-
-    Args:
-        filepath (str): the path to the file to save to
-        user (tuple[str, str]): the user to save as a tuple of username, full name
-        label (str): the user's label
-    """
-    USERNAME = User.NAME
-    HEADERS = [USERNAME]
-
-    username = user
+    start = (len(l) // n) * part + min(part, num_leftover)
     
-    if not os.path.isfile(filepath):
-        with open(filepath, 'w') as file:
-            writer = DictWriter(file, fieldnames=HEADERS)
-            writer.writeheader()
-
-    with open(filepath, 'a') as file:
-        writer = DictWriter(file, fieldnames=HEADERS)
-        writer.writerow({
-            USERNAME: username,
-        })
-
+    return l[start:start + chunk_size]
